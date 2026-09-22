@@ -3,7 +3,7 @@ import cors from "cors";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { imageSearch } from "@mudbill/duckduckgo-images-api";
+import axios from "axios";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,6 +62,7 @@ app.get("/api/search", async (req, res) => {
 
           No:
           --daemon-url
+
           No:
           npx
 
@@ -118,48 +119,129 @@ app.get("/api/search", async (req, res) => {
     })();
 
     // ========================================
-    // IMAGE SEARCH
+    // IMAGE SEARCH - BING IMAGES
     // ========================================
 
     const imageSearchPromise = (async () => {
       try {
         console.log("IMAGE SEARCH:", query);
 
-        const results = await imageSearch({
-          query,
-          safe: true,
-          iterations: 1,
-          retries: 2,
-        });
+        const response = await axios.get(
+          "https://www.bing.com/images/async",
+          {
+            params: {
+              q: query,
+              qft: "+filterui:imagesize-large",
+              safeSearch: "Strict",
+              count: 20,
+              first: 1,
+              mkt: "en-US",
+            },
 
-        console.log("IMAGE SEARCH SUCCESS:", results.length);
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/153.0.0.0 Safari/537.36",
+
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9," +
+                "image/avif,image/webp,*/*;q=0.8",
+
+              "Accept-Language": "en-US,en;q=0.9",
+
+              Referer: "https://www.bing.com/",
+            },
+
+            timeout: 15000,
+          }
+        );
+
+        const html = response.data;
+
+        const results = [];
+
+        // ========================================
+        // EXTRACT IMAGE RESULT DATA
+        // ========================================
+
+        const regex = /class="iusc"[^>]*m="([^"]+)"/g;
+
+        let match;
+
+        while ((match = regex.exec(html)) !== null) {
+          try {
+            const metadata = JSON.parse(
+              match[1]
+                .replace(/&quot;/g, '"')
+                .replace(/&amp;/g, "&")
+            );
+
+            results.push({
+              title: metadata.t || "",
+              image: metadata.murl || "",
+              thumbnail: metadata.turl || "",
+              url: metadata.purl || "",
+              source: metadata.purl
+                ? new URL(metadata.purl).hostname
+                : "bing.com",
+              width: metadata.w || null,
+              height: metadata.h || null,
+            });
+          } catch (parseError) {
+            // Ignore malformed individual result
+          }
+        }
+
+        // ========================================
+        // REMOVE DUPLICATES
+        // ========================================
+
+        const uniqueResults = Array.from(
+          new Map(
+            results
+              .filter((item) => item.image)
+              .map((item) => [item.image, item])
+          ).values()
+        );
+
+        console.log(
+          "IMAGE SEARCH SUCCESS:",
+          uniqueResults.length
+        );
 
         return {
           success: true,
           status: 200,
-          totalResults: results.length,
-          data: results.map((item) => ({
-            title: item.title,
-            image: item.image,
-            thumbnail: item.thumbnail,
-            url: item.url,
-            width: item.width,
-            height: item.height,
-            source: item.source,
-          })),
+          totalResults: uniqueResults.length,
+          data: uniqueResults.slice(0, 20),
         };
       } catch (error) {
-        console.error("========== IMAGE SEARCH ERROR ==========");
+        console.error(
+          "========== IMAGE SEARCH ERROR =========="
+        );
+
         console.error("message:", error.message);
-        console.error("========================================");
+
+        console.error(
+          "status:",
+          error.response?.status
+        );
+
+        console.error(
+          "========================================"
+        );
 
         return {
           success: false,
-          status: 500,
+          status: error.response?.status || 500,
           totalResults: 0,
           data: [],
           message: "Image search failed",
-          error: error.message,
+          error:
+            error.response?.status === 403
+              ? "Bing blocked the request"
+              : error.message,
         };
       }
     })();
