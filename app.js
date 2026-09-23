@@ -5,8 +5,18 @@ import { promisify } from "util";
 import path from "path";
 import axios from "axios";
 import * as yt from "youtube-search-without-api-key";
+import Parser from "rss-parser";
+
 
 const execFileAsync = promisify(execFile);
+const parser = new Parser({
+  customFields: {
+    item: [
+      ["source", "source", { keepArray: false }],
+    ],
+  },
+});
+
 
 const app = express();
 
@@ -265,37 +275,164 @@ app.get("/api/search", async (req, res) => {
     })();
 
     // ========================================
-// VIDEO SEARCH - BING VIDEOS
+    // VIDEO SEARCH - BING VIDEOS
+    // ========================================
+    const videoSearchPromise = (async () => {
+      try {
+        console.log("YOUTUBE VIDEO SEARCH:", query);
+
+        const results = await yt.search(query);
+
+        const videos = results
+          .filter((item) => item.id?.videoId)
+          .map((item) => ({
+            title: item.snippet?.title || "",
+            thumbnail:
+              item.snippet?.thumbnails?.high?.url ||
+              item.snippet?.thumbnails?.medium?.url ||
+              item.snippet?.thumbnails?.default?.url ||
+              "",
+            url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+            source: "youtube.com",
+            channel: item.snippet?.channelTitle || "",
+            publishedAt: item.snippet?.publishedAt || "",
+          }));
+
+        const uniqueResults = Array.from(
+          new Map(
+            videos.map((item) => [item.url, item])
+          ).values()
+        );
+
+        console.log(
+          "YOUTUBE VIDEO SEARCH SUCCESS:",
+          uniqueResults.length
+        );
+
+        return {
+          success: true,
+          status: 200,
+          totalResults: uniqueResults.length,
+          data: uniqueResults,
+        };
+      } catch (error) {
+        console.error(
+          "========== YOUTUBE VIDEO SEARCH ERROR =========="
+        );
+        console.error("message:", error.message);
+        console.error(
+          "==============================================="
+        );
+
+        return {
+          success: false,
+          status: 500,
+          totalResults: 0,
+          data: [],
+          message: "YouTube video search failed",
+          error: error.message,
+        };
+      }
+    })();
+
 // ========================================
-const videoSearchPromise = (async () => {
+// NEWS SEARCH - GOOGLE NEWS RSS
+// ========================================
+
+const newsSearchPromise = (async () => {
   try {
-    console.log("YOUTUBE VIDEO SEARCH:", query);
+    console.log("NEWS SEARCH:", query);
 
-    const results = await yt.search(query);
+    const feedUrl =
+      `https://news.google.com/rss/search?q=${encodeURIComponent(query)}` +
+      `&hl=en-IN&gl=IN&ceid=IN:en`;
 
-    const videos = results
-      .filter((item) => item.id?.videoId)
-      .map((item) => ({
-        title: item.snippet?.title || "",
-        thumbnail:
-          item.snippet?.thumbnails?.high?.url ||
-          item.snippet?.thumbnails?.medium?.url ||
-          item.snippet?.thumbnails?.default?.url ||
-          "",
-        url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
-        source: "youtube.com",
-        channel: item.snippet?.channelTitle || "",
-        publishedAt: item.snippet?.publishedAt || "",
-      }));
+    const response = await axios.get(feedUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+          "AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/153.0.0.0 Safari/537.36",
+      },
+      timeout: 15000,
+    });
+
+    const xml = response.data;
+
+    const feed = await parser.parseString(xml);
+
+    const news = feed.items
+      .filter((item) => item.link)
+      .map((item) => {
+        // ========================================
+        // EXTRACT SOURCE URL FROM RAW XML
+        // ========================================
+
+        let sourceUrl = "";
+
+        if (item.source) {
+          const escapedSource = String(item.source)
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+          const sourceRegex = new RegExp(
+            `<source[^>]*url=["']([^"']+)["'][^>]*>${escapedSource}<\\/source>`,
+            "i"
+          );
+
+          const sourceMatch = xml.match(sourceRegex);
+
+          if (sourceMatch) {
+            sourceUrl = sourceMatch[1];
+          }
+        }
+
+        // ========================================
+        // SOURCE NAME
+        // ========================================
+
+        const titleParts = (item.title || "").split(" - ");
+
+        const publisherFromTitle =
+          titleParts.length > 1
+            ? titleParts[titleParts.length - 1].trim()
+            : "";
+
+        const source =
+          typeof item.source === "string"
+            ? item.source
+            : item.source?.title ||
+              publisherFromTitle;
+
+        return {
+          title: item.title || "",
+          url: item.link || "",
+          source,
+          sourceUrl,
+          publishedAt:
+            item.isoDate ||
+            item.pubDate ||
+            "",
+          description:
+            item.contentSnippet ||
+            "",
+        };
+      });
+
+    // ========================================
+    // REMOVE DUPLICATES
+    // ========================================
 
     const uniqueResults = Array.from(
       new Map(
-        videos.map((item) => [item.url, item])
+        news.map((item) => [
+          `${item.title}-${item.publishedAt}`,
+          item,
+        ])
       ).values()
     );
 
     console.log(
-      "YOUTUBE VIDEO SEARCH SUCCESS:",
+      "NEWS SEARCH SUCCESS:",
       uniqueResults.length
     );
 
@@ -303,55 +440,129 @@ const videoSearchPromise = (async () => {
       success: true,
       status: 200,
       totalResults: uniqueResults.length,
-      data: uniqueResults,
+      data: uniqueResults.slice(0, 20),
     };
   } catch (error) {
     console.error(
-      "========== YOUTUBE VIDEO SEARCH ERROR =========="
+      "========== NEWS SEARCH ERROR =========="
     );
     console.error("message:", error.message);
-    console.error(
-      "==============================================="
-    );
+    console.error("=======================================");
 
     return {
       success: false,
       status: 500,
       totalResults: 0,
       data: [],
-      message: "YouTube video search failed",
+      message: "News search failed",
       error: error.message,
     };
   }
 })();
+    //---------------------------------------
+    //   SHOPPING SEARCH OPEN SEARCH
+    //---------------------------------------
+
+     const shoppingSearchPromise = (async () => {
+      try {
+        console.log("SHOPPING SEARCH:", query);
+
+        /*
+          IMPORTANT:
+
+          No:
+          --daemon-url
+
+          No:
+          npx
+
+          open-websearch will use its direct CLI runtime
+          when no local daemon is available.
+        */
+
+        const { stdout, stderr } = await execFileAsync(
+          process.execPath,
+          [
+            openWebSearchCli,
+            "search",
+           `Shopping on  ${query} (Shopping)`,
+            "--engine",
+            "duckduckgo",
+            "--json",
+          ],
+          {
+            cwd: process.cwd(),
+            windowsHide: true,
+            maxBuffer: 10 * 1024 * 1024,
+          }
+        );
+
+        if (stderr) {
+          console.log("TEXT SEARCH STDERR:", stderr);
+        }
+
+        console.log("TEXT SEARCH SUCCESS");
+
+        const searchData = JSON.parse(stdout);
+
+        return {
+          success: true,
+          status: 200,
+          data: searchData.data,
+        };
+      } catch (error) {
+        console.error("========== TEXT SEARCH ERROR ==========");
+        console.error("message:", error.message);
+        console.error("code:", error.code);
+        console.error("stdout:", error.stdout);
+        console.error("stderr:", error.stderr);
+        console.error("=======================================");
+
+        return {
+          success: false,
+          status: 500,
+          data: null,
+          message: "Text search failed",
+          error: error.message,
+        };
+      }
+    })();
     // ========================================
     // RUN BOTH IN PARALLEL
     // ========================================
 
 
 
-  const [
-  textResult,
-  imageResult,
-  videoResult,
-] = await Promise.all([
-  textSearchPromise,
-  imageSearchPromise,
-  videoSearchPromise,
-]);
+    const [
+      textResult,
+      imageResult,
+      videoResult,
+      shoppingResult,
+      newsResult
+    ] = await Promise.all([
+      textSearchPromise,
+      imageSearchPromise,
+      videoSearchPromise,
+      shoppingSearchPromise,
+      newsSearchPromise
+    ]);
 
     // ========================================
     // FINAL RESPONSE
     // ========================================
 
     return res.status(200).json({
-  success: true,
-  status: 200,
-  query,
-  text: textResult,
-  images: imageResult,
-  videos: videoResult,
-});
+      success: true,
+      status: 200,
+      query,
+      text: textResult,
+      images: imageResult,
+      videos: videoResult,
+      news:newsResult,
+      shopping:shoppingResult,
+      
+
+    });
   } catch (error) {
     console.error("========== SEARCH API ERROR ==========");
     console.error("message:", error.message);
